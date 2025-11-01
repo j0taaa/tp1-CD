@@ -27,7 +27,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
+test_logs/*.log
 # IDE
 .vscode/
 .idea/

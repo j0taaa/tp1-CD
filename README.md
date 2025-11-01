@@ -2,6 +2,19 @@
 
 Sistema de impressão distribuída com exclusão mútua usando gRPC, Algoritmo de Ricart-Agrawala e Relógios Lógicos de Lamport.
 
+### 🎯 Demonstração Rápida
+
+```bash
+git clone https://github.com/j0taaa/tp1-CD.git
+cd tp1-CD
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+./scripts/run_manual_test.sh  # Inicia servidor + 3 clientes
+```
+
+Em poucos segundos, você verá múltiplos clientes imprimindo documentos de forma coordenada, sem conflitos!
+
 ## 📋 Índice
 
 - [Quick Start](#quick-start)
@@ -18,6 +31,9 @@ Sistema de impressão distribuída com exclusão mútua usando gRPC, Algoritmo d
 
 - Python 3.12 ou superior
 - pip (gerenciador de pacotes Python)
+- Memória: 512MB+ disponível
+- Espaço em disco: ~100MB para dependências
+- Portas livres: 50051-50054 (configurável)
 
 ### Setup Rápido
 
@@ -33,16 +49,17 @@ venv\Scripts\activate     # Windows
 # 3. Instalar dependências
 pip install -r requirements.txt
 
-# 4. Gerar código gRPC (após criar proto/printing.proto)
-python3 -m grpc_tools.protoc -I proto --python_out=. --grpc_python_out=. proto/printing.proto
+# 4. Gerar código gRPC
+./scripts/generate_proto.sh
 
-# 5. Executar servidor de impressão (Terminal 1)
-python3 printer/server.py --port 50051
-
-# 6. Executar clientes (Terminais 2, 3, 4...)
-python3 client/main.py --id 1 --server localhost:50051 --port 50052 --clients localhost:50053,localhost:50054
-python3 client/main.py --id 2 --server localhost:50051 --port 50053 --clients localhost:50052,localhost:50054
-python3 client/main.py --id 3 --server localhost:50051 --port 50054 --clients localhost:50052,localhost:50053
+# 5. Executar servidores + clientes 
+# Executa servidor + 3 clientes automaticamente
+./scripts/run_manual_test.sh
+# Ou Manualmente (Terminais 1, 2, 3, 4...)
+PYTHONPATH=. python3 printer/server.py --port 50051 --delay-min 2.0 --delay-max 3.0
+PYTHONPATH=$PWD python3 client/main.py --id 1 --server localhost:50051 --port 50052 --clients localhost:50053,localhost:50052
+PYTHONPATH=$PWD python3 client/main.py --id 2 --server localhost:50051 --port 50053 --clients localhost:50052,localhost:50053
+PYTHONPATH=$PWD python3 client/main.py --id 3 --server localhost:50051 --port 50054 --clients localhost:50052,localhost:50054
 ```
 
 Para mais detalhes, consulte [SETUP.md](SETUP.md) e [docs/execution.md](docs/execution.md).
@@ -207,7 +224,40 @@ tp1/
 
 Este é um trabalho acadêmico. Para questões ou dúvidas, consulte o professor ou a especificação em [instructions.md](instructions.md).
 
-## 📝 Licença
+## � Troubleshooting
+
+### Problemas Comuns
+
+1. **Erro: Address already in use**
+   ```
+   Error: failed to bind: address already in use
+   ```
+   **Solução**: Verifique se as portas necessárias (50051-50054) estão livres:
+   ```bash
+   lsof -i :50051  # Repita para cada porta
+   ```
+
+2. **Erro: No module named 'printing_pb2'**
+   ```
+   ModuleNotFoundError: No module named 'printing_pb2'
+   ```
+   **Solução**: Execute o script de geração do código gRPC:
+   ```bash
+   ./scripts/generate_proto.sh
+   ```
+
+3. **Erro: PYTHONPATH não configurado**
+   ```
+   ModuleNotFoundError: No module named 'common'
+   ```
+   **Solução**: Execute com PYTHONPATH configurado:
+   ```bash
+   PYTHONPATH=$PWD python3 printer/server.py
+   ```
+
+Para outros problemas, consulte [docs/execution.md](docs/execution.md) ou abra uma issue.
+
+## 📝� Licença
 
 Trabalho acadêmico - uso educacional.
 
