@@ -75,36 +75,34 @@ class MutualExclusionServiceServicer(printing_pb2_grpc.MutualExclusionServiceSer
         response_timestamp = client_node.clock.receive_event(request.lamport_timestamp)
         
         with client_node.lock:
-            while True:
-                should_defer, log_message = client_node._evaluate_access_request(request)
+            should_defer, log_message = client_node._evaluate_access_request(request)
 
-                if should_defer:
-                    if request.client_id not in client_node.deferred_replies:
-                        client_node.deferred_replies[request.client_id] = request
-                        client_node.logger.info(
-                            log_message,
-                            lamport_timestamp=response_timestamp
-                        )
-
-                    # Wait until this client can grant access
-                    client_node.defer_condition.wait()
-                    continue
-
-                # Grant access immediately (or after waiting)
-                if request.client_id in client_node.deferred_replies:
-                    del client_node.deferred_replies[request.client_id]
-
-                client_node.logger.info(
-                    log_message,
-                    lamport_timestamp=client_node.clock.get_time()
-                )
-
-                response_timestamp = client_node.clock.tick()
-
+            if should_defer:
+                # Only add to deferred_replies if not already there
+                if request.client_id not in client_node.deferred_replies:
+                    client_node.deferred_replies[request.client_id] = request
+                    client_node.logger.info(
+                        log_message,
+                        lamport_timestamp=response_timestamp
+                    )
+                
+                # Return negative response when deferring
                 return MessageBuilder.build_access_response(
-                    access_granted=True,
-                    lamport_timestamp=response_timestamp,
+                    access_granted=False,
+                    lamport_timestamp=client_node.clock.tick()
                 )
+
+            # Grant access immediately
+            client_node.logger.info(
+                log_message,
+                lamport_timestamp=client_node.clock.get_time()
+            )
+            
+            response_timestamp = client_node.clock.tick()
+            return MessageBuilder.build_access_response(
+                access_granted=True,
+                lamport_timestamp=response_timestamp,
+            )
     
     def ReleaseAccess(self, request: printing_pb2.AccessRelease, context):
         """
@@ -206,14 +204,22 @@ class ClientNode:
         """Evaluate whether an incoming request should be deferred or granted."""
 
         if self.has_access:
+            # Always defer if we're in critical section
             return True, (
                 f"AccessRequest de cliente {request.client_id} DEFERIDO (em CS, TS: {request.lamport_timestamp})"
             )
 
-        if self.waiting_for_access and len(self.request_queue) > 0:
+        if self.waiting_for_access and self.request_queue:
+            # Make sure request queue is sorted
+            self.request_queue = deque(sorted(
+                self.request_queue,
+                key=lambda x: (x.lamport_timestamp, x.client_id)
+            ))
+            
             our_request = self.request_queue[0]
             our_timestamp = our_request.lamport_timestamp
 
+            # Compare timestamps first
             if request.lamport_timestamp < our_timestamp:
                 return False, (
                     f"AccessRequest de cliente {request.client_id} CONCEDIDO "
@@ -226,7 +232,7 @@ class ClientNode:
                     f"(TS {request.lamport_timestamp} > nosso TS {our_timestamp})"
                 )
 
-            # Timestamps equal -> compare client IDs (lower ID wins)
+            # Break timestamp ties with client IDs
             if request.client_id < self.client_id:
                 return False, (
                     f"AccessRequest de cliente {request.client_id} CONCEDIDO "
@@ -459,10 +465,11 @@ class ClientNode:
                 lamport_timestamp=timestamp
             )
             
-            # Note: We process deferred replies above, not here
-            # ReleaseAccess is just a notification that peer exited CS
-            
-            # Send ReleaseAccess to all peers (they'll process if needed)
+            # Process all deferred replies before releasing
+            deferred_requests = list(self.deferred_replies.values())
+            self.deferred_replies.clear()
+
+            # Create release message
             release_msg = MessageBuilder.build_access_release(
                 client_id=self.client_id,
                 lamport_timestamp=timestamp,
@@ -476,7 +483,7 @@ class ClientNode:
             if len(self.request_queue) > 0:
                 self.request_queue.popleft()
             
-            # Broadcast release to all peers
+            # Send releases to all peers first
             for peer_addr in self.peer_addresses:
                 threading.Thread(
                     target=self._send_access_release_to_peer,
@@ -484,11 +491,40 @@ class ClientNode:
                     daemon=True
                 ).start()
 
-            # Notify deferred requests waiting on this node
-            self.defer_condition.notify_all()
+            # Now process all deferred requests in order of timestamp
+            deferred_requests.sort(key=lambda x: (x.lamport_timestamp, x.client_id))
+            for peer_id, request in self.deferred_replies.items():
+                # Find the peer address based on client ID
+                peer_addr = None
+                for addr in self.peer_stubs:
+                    if f"cliente {peer_id}" in addr:  # matches format like "localhost:50052"
+                        peer_addr = addr
+                        break
+                
+                if not peer_addr:
+                    self.logger.error(
+                        f"Não foi possível encontrar o endereço do cliente {peer_id}",
+                        lamport_timestamp=self.clock.get_time()
+                    )
+                    continue
 
-            # Clear deferred tracking after notification
-            self.deferred_replies.clear()
+                response = MessageBuilder.build_access_response(
+                    access_granted=True,
+                    lamport_timestamp=self.clock.tick()
+                )
+                try:
+                    self.peer_stubs[peer_addr].ReplyToAccessRequest(response)
+                    self.logger.info(
+                        f"Enviando resposta adiada para cliente {peer_id} em {peer_addr}",
+                        lamport_timestamp=self.clock.get_time()
+                    )
+                except grpc.RpcError as e:
+                    self.logger.error(
+                        f"Erro ao enviar resposta adiada para cliente {peer_id}: {e.code()}",
+                        lamport_timestamp=self.clock.get_time()
+                    )
+
+            # Clear tracking state
             self.outstanding_replies.clear()
     
     def _send_access_release_to_peer(self, peer_addr: str, release: printing_pb2.AccessRelease):
